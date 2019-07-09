@@ -30,10 +30,10 @@ def save_model(model, file_name):
             torch.save(model, f)
 
 
-def load_model(file_name):
+def load_model(file_name, map_location=None):
     """Reads model from a file."""
     with open(file_name, 'rb') as f:
-        return torch.load(f)
+        return torch.load(f, map_location=map_location)
 
 
 def set_seed(seed):

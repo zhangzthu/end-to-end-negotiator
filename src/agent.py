@@ -20,6 +20,7 @@ import domain
 from engines import Criterion
 import math
 from collections import Counter
+import copy
 
 
 class Agent(object):
@@ -75,7 +76,7 @@ class RnnAgent(Agent):
         pass
 
     def update(self, agree, reward, choice=None, partner_choice=None,
-            partner_input=None, max_partner_reward=None):
+            partner_input=None, partner_reward=None):
         pass
 
     def read(self, inpt):
@@ -87,7 +88,8 @@ class RnnAgent(Agent):
         self.words.append(Variable(inpt))
         assert (torch.cat(self.words).size(0) == torch.cat(self.lang_hs).size(0))
 
-    def write(self, max_words=100):
+    def write(self, max_words=20):
+        # print('\t\trnn write')
         acts, outs, self.lang_h, lang_hs = self.model.write(self.lang_h, self.ctx_h,
                                                             max_words, self.args.temperature)
         self.lang_hs.append(lang_hs)
@@ -245,42 +247,93 @@ class HierarchicalAgent(RnnAgent):
 
 
 class RnnRolloutAgent(RnnAgent):
-    def __init__(self, model, args, name='Alice', train=False):
+    def __init__(self, model, args, name='Alice', train=False, diverse=False):
         super(RnnRolloutAgent, self).__init__(model, args, name)
         self.ncandidate = 5
         self.nrollout = 3
         self.rollout_len = 100
 
-    def write(self, max_words):
+    def __choose(self, local_sents, sample=False):
+        sents = local_sents[:-1]
+        lens, rev_idxs, hid_idxs = self._make_idxs(sents)
+        sel_out = self.sel_model.forward(sents, lens, rev_idxs, hid_idxs, Variable(self.ctx))
+
+        choices = self.domain.generate_choices(self.context, with_disagreement=True)
+
+        choices_logits = []
+        for i in range(self.domain.selection_length()):
+            idxs = [self.sel_model.item_dict.get_idx(c[i]) for c in choices]
+            idxs = Variable(torch.Tensor(idxs).long())
+            choices_logits.append(torch.gather(sel_out[i], 0, idxs).unsqueeze(1))
+
+        choice_logit = torch.sum(torch.cat(choices_logits, 1), 1, keepdim=True).squeeze(1)
+        choice_logit = choice_logit.sub(choice_logit.max(0)[0].item())
+        prob = F.softmax(choice_logit, dim=0)
+
+        if sample:
+            idx = prob.multinomial(1).detach()
+            logprob = F.log_softmax(choice_logit, dim=0).gather(0, idx)
+        else:
+            _, idx = prob.max(0, keepdim=True)
+            logprob = None
+
+        p_agree = prob[idx.item()]
+
+        # Pick only your choice
+        return choices[idx.item()][:self.domain.selection_length()], logprob, p_agree.item()
+
+    def write(self, max_words=20):
+        # print('\t\trollout write')
         best_score = -1
         res = None
 
+        # print('start rollout')
         for _ in range(self.ncandidate):
+            # print('\tcandidate')
             _, move, move_lang_h, move_lang_hs = self.model.write(
-                self.lang_h, self.ctx_h, 100, self.args.temperature)
+                self.lang_h, self.ctx_h, max_words, self.args.temperature)
 
             is_selection = len(move) == 1 and \
-                self.model.word_dict.get_word(move.data[0][0]) == '<selection>'
+                self.model.word_dict.get_word(move.data[0][0]) == '<selection>'  # whether the candidate is a terminal
 
             score = 0
             for _ in range(self.nrollout):
+                # print('\trollout')
                 combined_lang_hs = self.lang_hs + [move_lang_hs]
-                combined_words = self.words + [self.model.word2var('YOU:'), move]
+                combined_words = self.words + [self.model.word2var('YOU:').view(1, 1), move]
+                combined_sents = copy.deepcopy(self.sents)
+                combined_sents.append(torch.cat([self.model.word2var('YOU:').unsqueeze(1), move], 0))
 
-                if not is_selection:
+                last_lang_h = move_lang_h
+                if not is_selection:  # if not terminal
                     # Complete the conversation with rollout_length samples
-                    _, rollout, _, rollout_lang_hs = self.model.write(
-                        move_lang_h, self.ctx_h, self.rollout_len, self.args.temperature,
-                        stop_tokens=['<selection>'], resume=True)
-                    combined_lang_hs += [rollout_lang_hs]
-                    combined_words += [rollout]
+                    # _, rollout, _, rollout_lang_hs = self.model.write(
+                    #     move_lang_h, self.ctx_h, self.rollout_len, self.args.temperature,
+                    #     stop_tokens=['<selection>'], resume=True)
+                    side_tag = False
+                    rollout_len = 0
+                    for _ in range(10):
+                        acts, outs, last_lang_h, lang_hs = self.model.write(last_lang_h, self.ctx_h,
+                                                                            max_words, self.args.temperature)
+                        tag = 'YOU:' if side_tag else 'THEM:'
+                        is_select = len(outs) == 1 and self.model.word_dict.get_word(outs.data[0][0]) == '<selection>'
+                        combined_sents.append(torch.cat([self.model.word2var(tag).unsqueeze(1), outs], 0))
+                        combined_lang_hs += [lang_hs]
+                        combined_words += [outs]
+                        rollout_len += 1
+                        if is_select:
+                            break
+                        side_tag = not side_tag
+                    # print('rollout_len: {}'.format(rollout_len))
+                    # combined_lang_hs += [rollout_lang_hs]
+                    # combined_words += [rollout]
 
                 # Choose items
                 rollout_score = None
 
                 combined_lang_hs = torch.cat(combined_lang_hs)
                 combined_words = torch.cat(combined_words)
-                rollout_choice, _, p_agree = self._choose(combined_lang_hs, combined_words, sample=False)
+                rollout_choice, _, p_agree = self.__choose(combined_sents, sample=False)
                 rollout_score = self.domain.score(self.context, rollout_choice)
                 score += p_agree * rollout_score
 
@@ -292,8 +345,9 @@ class RnnRolloutAgent(RnnAgent):
         outs, lang_h, lang_hs = res
         self.lang_h = lang_h
         self.lang_hs.append(lang_hs)
-        self.words.append(self.model.word2var('YOU:'))
+        self.words.append(self.model.word2var('YOU:').unsqueeze(0))
         self.words.append(outs)
+        self.sents.append(torch.cat([self.model.word2var('YOU:').unsqueeze(1), outs], 0))
         return self._decode(outs, self.model.word_dict)
 
 
@@ -569,7 +623,6 @@ class StrategyAgent(HierarchicalAgent):
         return choices[idx.data[0]][:self.domain.selection_length()], logprob, p_agree
 
 
-
 class StrategyRolloutAgent(StrategyAgent):
     def __init__(self, models, args, name='Alice'):
         model, forward_model = models
@@ -812,8 +865,9 @@ class RlAgent(RnnAgent):
             100, self.args.temperature)
         self.logprobs.extend(logprobs)
         self.lang_hs.append(lang_hs)
-        self.words.append(self.model.word2var('YOU:'))
+        self.words.append(self.model.word2var('YOU:').view(1, 1))
         self.words.append(outs)
+        self.sents.append(torch.cat([self.model.word2var('YOU:').unsqueeze(1), outs], 0))
         assert (torch.cat(self.words).size()[0] == torch.cat(self.lang_hs).size()[0])
         return self._decode(outs, self.model.word_dict)
 

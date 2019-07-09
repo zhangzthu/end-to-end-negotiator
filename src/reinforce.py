@@ -141,13 +141,13 @@ def main():
     utils.use_cuda(args.cuda)
     utils.set_seed(args.seed)
 
-    alice_model = utils.load_model(args.alice_model_file)
-    alice_ty = get_agent_type(alice_model)
+    alice_model = utils.load_model(args.alice_model_file)  # RnnModel
+    alice_ty = get_agent_type(alice_model)  # RnnRolloutAgent
     alice = alice_ty(alice_model, args, name='Alice', train=True)
     alice.vis = args.visual
 
-    bob_model = utils.load_model(args.bob_model_file)
-    bob_ty = get_agent_type(bob_model)
+    bob_model = utils.load_model(args.bob_model_file)  # RnnModel
+    bob_ty = get_agent_type(bob_model)  # RnnAgent
     bob = bob_ty(bob_model, args, name='Bob', train=False)
 
     dialog = Dialog([alice, bob], args)

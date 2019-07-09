@@ -15,6 +15,8 @@ from torch import optim
 from torch import autograd
 import torch.nn as nn
 
+import os
+
 from agent import *
 import utils
 from utils import ContextGenerator
@@ -63,6 +65,9 @@ def get_agent_type(model, smart=False):
             return BaselineClusteringAgent
     else:
         assert False, 'unknown model type: %s' % (model)
+
+def set_gpu(cuda_id):
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_id)
 
 
 def main():
@@ -129,12 +134,15 @@ def main():
     utils.use_cuda(args.cuda)
     utils.set_seed(args.seed)
 
-    alice_model = utils.load_model(args.alice_model_file)
-    alice_ty = get_agent_type(alice_model, args.smart_alice)
+    device = None
+    if not torch.cuda.is_available():
+        device = 'cpu'
+    alice_model = utils.load_model(args.alice_model_file, device)  # RnnModel
+    alice_ty = get_agent_type(alice_model, True)  # Alice smart
     alice = alice_ty(alice_model, args, name='Alice', train=False, diverse=args.diverse_alice)
     alice.vis = args.visual
 
-    bob_model = utils.load_model(args.bob_model_file)
+    bob_model = utils.load_model(args.bob_model_file, device)
     bob_ty = get_agent_type(bob_model, args.smart_bob)
     bob = bob_ty(bob_model, args, name='Bob', train=False, diverse=args.diverse_bob)
 

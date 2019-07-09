@@ -140,6 +140,7 @@ class Dialog(object):
             self.metrics.register_ngram('full_match', text=ref_text)
 
     def _is_selection(self, out):
+        """if dialog end"""
         return len(out) == 1 and (out[0] in ['<selection>', '<no_agreement>'])
 
     def show_metrics(self):
@@ -163,12 +164,17 @@ class Dialog(object):
         self.metrics.reset()
 
         #words_left = np.random.randint(50, 200)
-        words_left = max_words
+        words_left = max_words  # max 5000 words
         length = 0
         expired = False
 
+        turn_num = 0
         while True:
-            out = writer.write(max_words=words_left)
+            # print('dialog turn [{}]'.format(turn_num))
+            turn_num += 1
+            # print('\twrite')
+            out = writer.write(max_words=20) #words_left)
+            # print('\twrite done')
             words_left -= len(out)
             length += len(out)
 
@@ -178,6 +184,7 @@ class Dialog(object):
             self.metrics.record('%s_unique' % writer.name, out)
 
             conv.append(out)
+            # print('\tread')
             reader.read(out)
             if not writer.human:
                 logger.dump_sent(writer.name, out)
@@ -191,7 +198,7 @@ class Dialog(object):
                 break
 
             writer, reader = reader, writer
-
+        # print('turn_num:{}'.format(turn_num))
 
         choices = []
         for agent in self.agents:
@@ -208,7 +215,7 @@ class Dialog(object):
             logger.dump_reward(agent.name, agree, reward)
             j = 1 if i == 0 else 0
             agent.update(agree, reward, choice=choices[i],
-                partner_choice=choices[j], partner_input=ctxs[j], max_partner_reward=rewards[j])
+                partner_choice=choices[j], partner_input=ctxs[j], partner_reward=rewards[j])
 
         if agree:
             self.metrics.record('advantage', rewards[0] - rewards[1])
